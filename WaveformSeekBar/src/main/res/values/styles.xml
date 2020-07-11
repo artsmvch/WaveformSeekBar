@@ -1,0 +1,12 @@
+<resources>
+
+    <style name="Base.AppTheme.WaveformSeekBar" parent="">
+        <item name="waveMaxWidth">10dp</item>
+        <item name="waveGap">1dp</item>
+        <item name="waveCornerRadius">1dp</item>
+        <item name="waveBackgroundColor">#80A1A1A1</item>
+        <item name="waveProgressColor">#3E8ACC</item>
+        <item name="waveAnimDuration">300</item>
+    </style>
+
+</resources>

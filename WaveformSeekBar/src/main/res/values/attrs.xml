@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <declare-styleable name="WaveformSeekBar">
+        <attr name="waveBackgroundColor" format="color"/>
+        <attr name="waveProgressColor" format="color"/>
+        <attr name="waveGap" format="dimension"/>
+        <attr name="waveCornerRadius" format="dimension"/>
+        <attr name="waveMaxWidth" format="dimension"/>
+        <attr name="waveAnimDuration" format="integer"/>
+    </declare-styleable>
+
+    <attr name="waveformSeekBarStyle" format="reference"/>
+
+</resources>

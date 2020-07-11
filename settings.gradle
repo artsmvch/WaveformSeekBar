@@ -1,0 +1,3 @@
+include ':WaveformSeekBar'
+include ':app'
+rootProject.name = "WaveformSeekBarExample"
