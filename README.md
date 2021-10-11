@@ -54,9 +54,9 @@ protected void onCreate(Bundle savedInstanceState) {
     setContentView(R.layout.activity_waveformseekbar_example);
 
     final WaveformSeekBar seekBar = findViewById(R.id.waveform_seek_bar);
-    seekBar.setOnSeekBarChangeListener(new WaveformSeekBar.OnSeekBarChangeListener() {
+    seekBar.setOnSeekBarChangeListener(new WaveformSeekBar.Callback() {
         @Override
-        public void onProgressInPercentageChanged(WaveformSeekBar seekBar, float percent, boolean fromUser) {
+        public void onProgressChanged(WaveformSeekBar seekBar, float percent, boolean fromUser) {
 
         }
 
@@ -84,9 +84,9 @@ protected void onCreate(Bundle savedInstanceState) {
 }
 
 private int[] createWaveform() {
-    final Random random = new Random(System.currentTimeMillis());
+    //final Random random = new Random(System.currentTimeMillis());
 
-    final int length = 50 + random.nextInt(50);
+    final int length = 50;
     final int[] values = new int[length];
     int maxValue = 0;
 
