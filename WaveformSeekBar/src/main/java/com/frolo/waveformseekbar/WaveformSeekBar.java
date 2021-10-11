@@ -1,6 +1,5 @@
 package com.frolo.waveformseekbar;
 
-import android.animation.Animator;
 import android.animation.ValueAnimator;
 import android.annotation.TargetApi;
 import android.content.Context;
@@ -26,21 +25,33 @@ import android.view.animation.Interpolator;
  * That array of ints is set via {@link WaveformSeekBar#setWaveform(int[], boolean)}
  * and {@link WaveformSeekBar#setWaveform(int[], boolean)} methods.
  * The progress is set in percentage via {@link WaveformSeekBar#setProgressInPercentage(float)} method.
- * The tracking of the progress is listened using {@link WaveformSeekBar.OnSeekBarChangeListener}.
+ * The tracking of the progress is listened using {@link WaveformSeekBar.Callback}.
+ *
+ * The structure of the waveform on the UI be like:
+ * [paddingLeft] [edgeWaveGap] [wave] [waveGap] [wave] ... [wave] [waveGap] [wave] [edgeWaveGap] [paddingRight].
  */
 public class WaveformSeekBar extends View {
 
     private static final String LOG_TAG = WaveformSeekBar.class.getSimpleName();
     private static final boolean DEBUG = BuildConfig.DEBUG;
 
-    private static final int MAX_WIDTH_NO_LIMIT = -1;
+    private static final float DEFAULT_VIEW_WIDTH_IN_DP = 280f;
+    private static final float DEFAULT_VIEW_HEIGHT_IN_DP = 72f;
+    private static final float DEFAULT_EDGE_WAVE_GAP_WIDTH_IN_DP = 2f;
+
+    private static final float MAX_WIDTH_NO_LIMIT = -1f;
 
     private static final int ANIM_DURATION = 200;
 
     public enum WaveCornerType { NONE, AUTO, EXACTLY }
 
-    private static float dpToPx(Context context, float dp){
-        return dp * ((float) context.getResources().getDisplayMetrics().densityDpi / DisplayMetrics.DENSITY_DEFAULT);
+    /**
+     * Creates a waveform based on the default implementation.
+     * @param waves to create waveform from
+     * @return waveform instance
+     */
+    public static Waveform createWaveform(int[] waves) {
+        return new WaveformImpl(waves);
     }
 
     private static float clampPercentage(float percent) {
@@ -49,45 +60,173 @@ public class WaveformSeekBar extends View {
         return percent;
     }
 
-    //Styling
+    private static int calculateDiscretePosition(int count, float percent) {
+        if (percent < 0.001f) {
+            return -1;
+        }
+        if (percent > 0.999f) {
+            return count - 1;
+        }
+        // Edge wave areas (the leftmost and the rightmost) have
+        // only half the percentage width of a normal wave.
+        float normalWavePercent = 1f / (count - 1);
+        float missingEdgeWavePercent = normalWavePercent / 2f;
+        float actualPercent = (percent + missingEdgeWavePercent) / (1 + missingEdgeWavePercent * 2f);
+        return (int) (count * actualPercent);
+    }
+
+    /**
+     * Calculates the intermediate waveform between <code>start</code> and <code>end</code> waveforms.
+     * <code>factor</code> defines the position between the start and end waves. Normally, the factor
+     * should be from 0 to 1. If the factor is 0, then the resulting waveform is equal to the start one.
+     * If the factor is 1, then the resulting waveform is equal to the end one.
+     * @param start the start waveform
+     * @param end the end waveform
+     * @param factor factor
+     * @return blended waveform
+     */
+    private static Waveform blendWaveforms(Waveform start, Waveform end, float factor) {
+        int waveCount = end.getWaveCount();
+        if (waveCount != start.getWaveCount()) {
+            return end;
+        }
+        float normalizer = ((float) end.getMaxWave()) / start.getMaxWave();
+        int[] waves = new int[waveCount];
+        for (int i = 0; i < waveCount; i++) {
+            float normalizedStartWave = start.getWaveAt(i) * normalizer;
+            waves[i] = (int) (normalizedStartWave + (end.getWaveAt(i) - normalizedStartWave) * factor);
+        }
+        return createWaveform(waves);
+    }
+
+    /**
+     * The normal color of the waves that are not in progress.
+     */
     private int mWaveBackgroundColor;
+
+    /**
+     * The color of the waves that are in progress.
+     */
     private int mWaveProgressColor;
-    private float mPrefWaveGap;
-    private int mWaveMaxWidth = MAX_WIDTH_NO_LIMIT; // if -1 then there is no limit for wave width
-    private float mWaveWidth;
+
+    /**
+     * The preferred gap between waves. Is set by the client.
+     */
+    private float mPreferredWaveGap;
+
+    /**
+     * The actual gap between waves.
+     */
     private float mWaveGap;
+
+    /**
+     * The edge gap between edge waves and lateral content borders.
+     */
+    private float mEdgeWaveGap;
+
+    /**
+     * The max width of waves. Is set by the client.
+     */
+    private float mWaveMaxWidth = MAX_WIDTH_NO_LIMIT;
+
+    /**
+     * The actual width of waves.
+     */
+    private float mWaveWidth;
+
+    /**
+     * Corner type of wave rectangles. Is set by the client.
+     */
     private WaveCornerType mWaveCornerType;
+
+    /**
+     * The preferred corner radius of wave rectangles. Is set by the client.
+     */
+    private float mPreferredWaveCornerRadius;
+
+    /**
+     * The actual corner radius of wave rectangles.
+     */
     private float mWaveCornerRadius;
 
-    //Drawing tools
+    /**
+     * Paint for drawing waves that are not in progress.
+     */
     private final Paint mWaveBackgroundPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint mWaveProgressPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private RectF mTmpRect = null;
 
-    //Animation
-    private Animator mWaveAnim = null;
-    private long mWaveAnimDur;
+    /**
+     * Paint for drawing waves that are in progress.
+     */
+    private final Paint mWaveProgressPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+    /**
+     * Temporary rectangle. Used for drawing.
+     */
+    private RectF mTempRect;
+
+    /**
+     * Current waveform change animation.
+     */
+    private ValueAnimator mWaveAnim = null;
+
+    /**
+     * Waveform change animation duration.
+     */
+    private final long mWaveAnimDur;
+
+    /**
+     * Waveform change animation interpolator.
+     */
     private final Interpolator mWaveAnimInterpolator = new AccelerateDecelerateInterpolator();
-    private float mWaveHeightFactor = 1f;
+
+    /**
+     * The current animated factor of waveform change. Possible value in the range 0..1.
+     */
+    private float mWaveAnimFactor = 1f;
+
+    /**
+     * The update listener for waveform change animation.
+     */
     private final ValueAnimator.AnimatorUpdateListener mWaveAnimUpdateListener =
             new ValueAnimator.AnimatorUpdateListener() {
                 @Override
                 public void onAnimationUpdate(ValueAnimator animation) {
-                    mWaveHeightFactor = (float) animation.getAnimatedValue();
+                    mWaveAnimFactor = (float) animation.getAnimatedValue();
                     invalidate();
                 }
             };
 
-    //Motion events
+    /**
+     * Indicates if the user is currently controlling the progress by touching.
+     */
     private boolean mIsTracking = false;
 
-    //Waveform data and its progress
+    /**
+     * The current waveform. Is set by the user.
+     */
     private Waveform mWaveform;
-    private float mProgressPercentPosition = 0.0f;
-    private float mProgressPosition = -1; // position of the progress in percentage
 
-    //Listener
-    private OnSeekBarChangeListener mListener;
+    /**
+     * The previous waveform. Can be an intermediate waveform if the change animation
+     * of waveforms has not been completed earlier.
+     */
+    private Waveform mPrevWaveform;
+
+    /**
+     * Current progress as a percentage. It can be less than 0 if the user was tracking progress outside the left wave,
+     * and it can be greater than 1 if the user was tracking progress outside the right wave.
+     */
+    private float mProgressPercentPosition = 0.0f;
+
+    /**
+     * Current progress as a whole value.
+     */
+    private int mDiscreteProgressPosition = -1;
+
+    /**
+     * Callback for this view.
+     */
+    private Callback mCallback;
 
     public WaveformSeekBar(Context context) {
         this(context, null);
@@ -98,24 +237,20 @@ public class WaveformSeekBar extends View {
     }
 
     public WaveformSeekBar(Context context, AttributeSet attrs, int defStyleAttr) {
-        super(context, attrs, defStyleAttr);
-        init(context, attrs, defStyleAttr, R.style.Base_AppTheme_WaveformSeekBar);
+        this(context, attrs, defStyleAttr, R.style.Base_AppTheme_WaveformSeekBar);
     }
 
     @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     public WaveformSeekBar(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
         super(context, attrs, defStyleAttr, defStyleRes);
-        init(context, attrs, defStyleAttr, defStyleRes);
-    }
 
-    private void init(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
         final TypedArray a = context.getTheme()
                 .obtainStyledAttributes(attrs, R.styleable.WaveformSeekBar, defStyleAttr, defStyleRes);
         mWaveBackgroundColor = a.getColor(R.styleable.WaveformSeekBar_waveBackgroundColor, Color.LTGRAY);
         mWaveProgressColor = a.getColor(R.styleable.WaveformSeekBar_waveProgressColor, Color.GRAY);
-        mPrefWaveGap = a.getDimension(R.styleable.WaveformSeekBar_waveGap, dpToPx(context, 0f));
-        mWaveMaxWidth = (int) a.getDimension(R.styleable.WaveformSeekBar_waveMaxWidth, MAX_WIDTH_NO_LIMIT);
-        mWaveCornerRadius = a.getDimension(R.styleable.WaveformSeekBar_waveCornerRadius, dpToPx(context, 0f));
+        mPreferredWaveGap = a.getDimension(R.styleable.WaveformSeekBar_waveGap, 0f);
+        mWaveMaxWidth = a.getDimension(R.styleable.WaveformSeekBar_waveMaxWidth, MAX_WIDTH_NO_LIMIT);
+        mPreferredWaveCornerRadius = a.getDimension(R.styleable.WaveformSeekBar_waveCornerRadius, 0f);
         mWaveCornerType = WaveCornerType.AUTO;
         mWaveAnimDur = a.getInt(R.styleable.WaveformSeekBar_waveAnimDuration, ANIM_DURATION);
         a.recycle();
@@ -125,18 +260,30 @@ public class WaveformSeekBar extends View {
     }
 
     private RectF getTempRect() {
-        if (mTmpRect == null) {
-            mTmpRect = new RectF();
+        if (mTempRect == null) {
+            mTempRect = new RectF();
         }
-        return mTmpRect;
+        return mTempRect;
+    }
+
+    private float dpToPx(float dp){
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        return dp * ((float) metrics.densityDpi / DisplayMetrics.DENSITY_DEFAULT);
     }
 
     private int getWaveCount() {
         return mWaveform != null ? mWaveform.getWaveCount() : 0;
     }
 
-    public void setOnSeekBarChangeListener(OnSeekBarChangeListener l) {
-        this.mListener = l;
+    private float getPercentageForX(float x) {
+        float contentWidth = getMeasuredWidth() - getPaddingLeft() - getPaddingRight();
+        float wavesContentWidth = contentWidth - mEdgeWaveGap * 2f;
+        float relativeX = x - getPaddingLeft() - mEdgeWaveGap;
+        return relativeX / wavesContentWidth;
+    }
+
+    public void setCallback(Callback callback) {
+        this.mCallback = callback;
     }
 
     /**
@@ -149,38 +296,38 @@ public class WaveformSeekBar extends View {
 
     private void setProgressInPercentageInternal(float percent, boolean fromUser) {
         mProgressPercentPosition = percent;
-        int position = Math.round(getWaveCount() * percent) - 1;
-        if (mProgressPosition != position) {
-            mProgressPosition = position;
+        int discretePosition = calculateDiscretePosition(getWaveCount(), percent);
+        if (mDiscreteProgressPosition != discretePosition) {
+            mDiscreteProgressPosition = discretePosition;
             invalidate();
         }
-        if (mListener != null) {
-            mListener.onProgressInPercentageChanged(this, clampPercentage(percent), fromUser);
+        if (mCallback != null) {
+            mCallback.onProgressChanged(this, clampPercentage(percent), fromUser);
         }
     }
 
     /**
-     * Setups {@code waves} to display.
+     * Sets {@code waves} to display.
      * @param waves new waveform data
      */
-    public void setWaveform(/*nullable*/ int[] waves) {
-        setWaveform(new WaveformImpl(waves));
+    public void setWaveform(int[] waves) {
+        setWaveform(createWaveform(waves));
     }
 
     /**
-     * Setups {@code waves} to display and then animates it.
+     * Sets {@code waves} to display and then animates it.
      * @param waves new waveform data
      * @param animate if waveform appearance needs to be animated
      */
-    public void setWaveform(/*nullable*/ int[] waves, boolean animate) {
-        setWaveform(new WaveformImpl(waves), animate);
+    public void setWaveform(int[] waves, boolean animate) {
+        setWaveform(createWaveform(waves), animate);
     }
 
     /**
-     * Setups {@code waveform} to display.
+     * Sets {@code waveform} to display.
      * @param waveform new waveform data
      */
-    public void setWaveform(/*nullable*/ Waveform waveform) {
+    public void setWaveform(Waveform waveform) {
         setWaveform(waveform, true);
     }
 
@@ -189,7 +336,24 @@ public class WaveformSeekBar extends View {
      * @param waveform new waveform data
      * @param animate if waveform appearance needs to be animated
      */
-    public void setWaveform(/*nullable*/ Waveform waveform, boolean animate) {
+    public void setWaveform(Waveform waveform, boolean animate) {
+        Waveform currWaveform = mWaveform;
+        if (currWaveform != null) {
+            Waveform prevWaveform = mPrevWaveform;
+            // First, checking if there is a running waveform animation
+            if (prevWaveform != null
+                    && prevWaveform.getWaveCount() == currWaveform.getWaveCount()
+                    && mWaveAnim != null && mWaveAnim.isRunning()) {
+                // Creating an intermediate waveform according to the current animation factor
+                float factor = (float) mWaveAnim.getAnimatedValue();
+                mPrevWaveform = blendWaveforms(prevWaveform, currWaveform, factor);
+            } else {
+                mPrevWaveform = currWaveform;
+            }
+        } else {
+            mPrevWaveform = null;
+        }
+
         this.mWaveform = waveform;
 
         if (mWaveAnim != null) {
@@ -199,12 +363,13 @@ public class WaveformSeekBar extends View {
 
         calculateWaveDimensions(getWaveCount());
 
-        setProgressInPercentageInternal(0.0f, false);
+        // Need to re-calculate the discrete progress position
+        mDiscreteProgressPosition = calculateDiscretePosition(getWaveCount(), mProgressPercentPosition);
 
-        if (!animate) {
-            invalidate();
-        } else {
-            // Animating increasing of waves from 0 to 1
+        invalidate();
+
+        if (animate) {
+            // Animating the change of waves
             ValueAnimator newWaveAnim = ValueAnimator.ofFloat(0.0f, 1.0f);
             newWaveAnim.setDuration(mWaveAnimDur);
             newWaveAnim.setInterpolator(mWaveAnimInterpolator);
@@ -219,7 +384,7 @@ public class WaveformSeekBar extends View {
      * Sets the wave background color.
      * @param color background color
      */
-    public void setWaveBackgroundColor(/*color int*/ int color) {
+    public void setWaveBackgroundColor(int color) {
         this.mWaveBackgroundColor = color;
         mWaveBackgroundPaint.setColor(mWaveProgressColor);
         invalidate();
@@ -229,29 +394,42 @@ public class WaveformSeekBar extends View {
      * Sets the wave progress color.
      * @param color progress color
      */
-    public void setWaveProgressColor(/*color int*/ int color) {
+    public void setWaveProgressColor(int color) {
         this.mWaveProgressColor = color;
         mWaveProgressPaint.setColor(mWaveProgressColor);
         invalidate();
     }
 
     /**
-     * Sets the gap between waves in pixels.
-     * NOTE: the final gap may be not the same value,
-     * for example, in cases where the wave width is too small, so the wave is almost invisible.
+     * Sets the gap between waves in pixels. NOTE: this is only a preferred value
+     * and the final gap may be different, for example, in cases where the wave width is too small,
+     * which may cause the wave to be almost invisible.
      * @param gap the gap between waves in pixels
      */
-    public void setPreferredWaveGap(int gap) {
-        this.mPrefWaveGap = gap;
+    public void setWaveGap(int gap) {
+        this.mPreferredWaveGap = gap;
         calculateWaveDimensions(getWaveCount());
+        invalidate();
     }
 
     /**
-     * Sets the wave rect corner radius in pixels.
-     * @param radius the wave rect corner radius in pixels
+     * Sets the wave rectangle corner type.
+     * @param type type of wave corners
+     */
+    public void setWaveCornerType(WaveCornerType type) {
+        this.mWaveCornerType = type;
+        calculateWaveCornerRadius();
+        invalidate();
+    }
+
+    /**
+     * Sets the wave rectangle corner radius in pixels.
+     * NOTE: this takes effect only if the wave corner type is set to {@link WaveCornerType#EXACTLY}.
+     * @param radius corner radius in pixels
      */
     public void setWaveCornerRadius(int radius) {
-        this.mWaveCornerRadius = radius;
+        this.mPreferredWaveCornerRadius = radius;
+        calculateWaveCornerRadius();
         invalidate();
     }
 
@@ -263,6 +441,7 @@ public class WaveformSeekBar extends View {
     private void calculateWaveDimensions(int waveCount) {
         if (waveCount <= 0) {
             mWaveWidth = 0f;
+            mWaveGap = 0f;
             return;
         }
 
@@ -273,43 +452,65 @@ public class WaveformSeekBar extends View {
             mWaveGap = 0f;
         }
 
-        float waveGapCandidate = mPrefWaveGap;
-        float totalGap;
-        if (waveGapCandidate > 0)
-            totalGap = waveGapCandidate * (waveCount - 1);
-        else totalGap = 0;
+        float edgeWaveGapCandidate = Math.min(dpToPx(DEFAULT_EDGE_WAVE_GAP_WIDTH_IN_DP), contentWidth / 40f);
+        int edgeWaveGapCount = 2;
 
-        float remainingSpace = Math.abs(contentWidth - totalGap);
+        int waveGapCount = waveCount - 1;
+        float waveGapCandidate = mPreferredWaveGap;
+        float totalGap;
+        if (waveGapCandidate > 0) {
+            totalGap = waveGapCandidate * waveGapCount + edgeWaveGapCandidate * edgeWaveGapCount;
+        } else {
+            totalGap = 0;
+        }
+
+        float remainingSpace = contentWidth - totalGap;
+        if (remainingSpace < 0f) {
+            remainingSpace = 0f;
+        }
         float waveWidthCandidate = remainingSpace / waveCount;
 
-        // Calculating wave width first
+        // Calculating wave width
         if (mWaveMaxWidth > 0 && waveWidthCandidate > mWaveMaxWidth) {
             waveWidthCandidate = mWaveMaxWidth;
         }
         if (waveWidthCandidate <= 0f) {
-            waveWidthCandidate = 1f;
+            // Wave should be at least 1 pixel wide, otherwise it will be invisible
+            waveWidthCandidate = Math.min(1f, ((float) contentWidth) / waveCount);
         }
 
-        // Calculating wave gaps then
-        waveGapCandidate = (contentWidth - (waveWidthCandidate * waveCount)) / (waveCount + 1);
-        if (waveGapCandidate < 0) waveGapCandidate = 0;
+        // Calculating wave gaps
+        if (waveGapCount > 0) {
+            waveGapCandidate = (contentWidth
+                    - (waveWidthCandidate * waveCount)
+                    - (edgeWaveGapCandidate * edgeWaveGapCount)) / waveGapCount;
+            if (waveGapCandidate < 0f) {
+                waveGapCandidate = 0f;
+            }
+        } else {
+            waveGapCandidate = 0f;
+            edgeWaveGapCandidate = (contentWidth - (waveWidthCandidate * waveCount)) / 2f;
+        }
 
         mWaveWidth = waveWidthCandidate;
         mWaveGap = waveGapCandidate;
+        mEdgeWaveGap = edgeWaveGapCandidate;
 
+        calculateWaveCornerRadius();
+    }
+
+    private void calculateWaveCornerRadius() {
         switch (mWaveCornerType) {
             case NONE:
                 mWaveCornerRadius = 0f;
                 break;
             case AUTO:
-                mWaveCornerRadius = mWaveWidth / 2;
+                mWaveCornerRadius = mWaveWidth / 2f;
                 break;
             case EXACTLY:
-                // the same value
+                mWaveCornerRadius = Math.min(mPreferredWaveCornerRadius, mWaveWidth / 2f);
                 break;
         }
-
-        invalidate();
     }
 
     /**
@@ -322,18 +523,18 @@ public class WaveformSeekBar extends View {
 
     @Override
     protected int getSuggestedMinimumWidth() {
-        return (int) dpToPx(getContext(), 300f);
+        return (int) dpToPx(DEFAULT_VIEW_WIDTH_IN_DP);
     }
 
     @Override
     protected int getSuggestedMinimumHeight() {
-        return (int) dpToPx(getContext(), 72f);
+        return (int) dpToPx(DEFAULT_VIEW_HEIGHT_IN_DP);
     }
 
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
-        mWaveHeightFactor = 1f;
+        mWaveAnimFactor = 1f;
     }
 
     @Override
@@ -372,8 +573,8 @@ public class WaveformSeekBar extends View {
                 || event.getAction() == MotionEvent.ACTION_CANCEL) {
             mIsTracking = false;
 
-            if (mListener != null) {
-                mListener.onStopTrackingTouch(this);
+            if (mCallback != null) {
+                mCallback.onStopTrackingTouch(this);
             }
 
             ViewParent parent = getParent();
@@ -389,8 +590,8 @@ public class WaveformSeekBar extends View {
         if (event.getAction() == MotionEvent.ACTION_DOWN) {
             mIsTracking = true;
 
-            if (mListener != null) {
-                mListener.onStartTrackingTouch(this);
+            if (mCallback != null) {
+                mCallback.onStartTrackingTouch(this);
             }
 
             ViewParent parent = getParent();
@@ -401,10 +602,8 @@ public class WaveformSeekBar extends View {
             if (DEBUG) Log.d(LOG_TAG, "Started tracking");
         }
 
-        // finding the touched wave position
-        final float contentWidth = getMeasuredWidth() - getPaddingLeft() - getPaddingRight();
-        final float dstToLeftBorder = x - getPaddingLeft() - mWaveGap;
-        float percent = dstToLeftBorder / contentWidth;
+        // Finding the touched wave position
+        float percent = getPercentageForX(x);
         setProgressInPercentageInternal(percent, true);
 
         if (DEBUG) Log.d(LOG_TAG, "Tracked to percent: " + percent);
@@ -418,22 +617,35 @@ public class WaveformSeekBar extends View {
         if (waveform == null || waveform.getWaveCount() <= 0) {
             return;
         }
+
         final int maxWave = waveform.getMaxWave();
 
         final int contentHeight = getMeasuredHeight() - getPaddingTop() - getPaddingBottom();
         final int leftPadding = getPaddingLeft();
-        final float waveCenterY = getPaddingTop() + (float) contentHeight / 2;
-        final float maxWaveHeight = contentHeight * mWaveHeightFactor;
-        final float waveHalfOfWidth = mWaveWidth / 2;
+        final float waveCenterY = getPaddingTop() + contentHeight / 2f;
+        final float waveHalfOfWidth = mWaveWidth / 2f;
 
         for (int i = 0; i < waveform.getWaveCount(); i++) {
-            int wave = waveform.getWaveAt(i);
-            float waveHeight = maxWaveHeight * ((float) wave / maxWave);
+            final float waveHeight;
+            if (mPrevWaveform != null && mWaveAnimFactor < 1f) {
+                int prevWave = mPrevWaveform.getWaveAt(i);
+                int prevMaxWave = mPrevWaveform.getMaxWave();
+                float prevWaveHeight = contentHeight * ((float) prevWave / prevMaxWave);
+
+                int targetWave = waveform.getWaveAt(i);
+                int targetMaxWave = waveform.getMaxWave();
+                float targetWaveHeight = contentHeight * ((float) targetWave / targetMaxWave);
+
+                waveHeight = prevWaveHeight + (targetWaveHeight - prevWaveHeight) * mWaveAnimFactor;
+            } else {
+                int targetWave = waveform.getWaveAt(i);
+                waveHeight = contentHeight * ((float) targetWave / maxWave) * mWaveAnimFactor;
+            }
             float waveHalfOfHeight = waveHeight / 2;
-            float waveCenterX = i * (mWaveWidth + mWaveGap) + mWaveGap + waveHalfOfWidth + leftPadding;
+            float waveCenterX = i * (mWaveWidth + mWaveGap) + waveHalfOfWidth + leftPadding + mEdgeWaveGap;
 
             final Paint paint;
-            if (i <= mProgressPosition) {
+            if (i <= mDiscreteProgressPosition) {
                 paint = mWaveProgressPaint;
             } else {
                 paint = mWaveBackgroundPaint;
@@ -461,25 +673,34 @@ public class WaveformSeekBar extends View {
         int getMaxWave();
     }
 
+    /**
+     * Default Waveform implementation.
+     */
     private static class WaveformImpl implements Waveform {
 
         final int waveCount;
         final int[] waves;
-        final int maxWave;
+        // Lazily calculated
+        Integer maxWave = null;
 
         WaveformImpl(int[] waves) {
             this.waves = waves;
             this.waveCount = waves != null ? waves.length : 0;
+        }
 
-            if (waves != null && waves.length > 0) {
-                int maxWave = waves[0];
-                for (int w : waves) {
-                    if (w > maxWave) maxWave = w;
-                }
-                this.maxWave = maxWave;
-            } else {
-                this.maxWave = 0;
+        private int calculateMaxWave() {
+            if (waves == null || waves.length <= 0) {
+                return 0;
             }
+
+            int maxWave = waves[0];
+            for (int i = 1; i < waves.length; i++) {
+                int wave = waves[i];
+                if (wave > maxWave) {
+                    maxWave = wave;
+                }
+            }
+            return maxWave;
         }
 
         @Override
@@ -494,15 +715,15 @@ public class WaveformSeekBar extends View {
 
         @Override
         public int getMaxWave() {
+            if (maxWave == null) {
+                maxWave = calculateMaxWave();
+            }
             return maxWave;
         }
     }
 
-    /**
-     * Actually, the same listener as {@link android.widget.SeekBar.OnSeekBarChangeListener}.
-     */
-    public interface OnSeekBarChangeListener {
-        void onProgressInPercentageChanged(WaveformSeekBar seekBar, float percent, boolean fromUser);
+    public interface Callback {
+        void onProgressChanged(WaveformSeekBar seekBar, float percent, boolean fromUser);
 
         void onStartTrackingTouch(WaveformSeekBar seekBar);
 
