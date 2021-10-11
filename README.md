@@ -21,7 +21,7 @@ allprojects {
 
 2. Add the dependency:
 ```groovy
-implementation 'com.github.alexei-frolo:WaveformSeekBar:1.0'
+implementation 'com.github.alexei-frolo:WaveformSeekBar:1.1'
 ```
 
 ### WaveformSeekBar example
