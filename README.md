@@ -84,7 +84,7 @@ protected void onCreate(Bundle savedInstanceState) {
 }
 
 private int[] createWaveform() {
-    //final Random random = new Random(System.currentTimeMillis());
+    final Random random = new Random(System.currentTimeMillis());
 
     final int length = 50;
     final int[] values = new int[length];
